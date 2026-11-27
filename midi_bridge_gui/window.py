@@ -17,7 +17,10 @@
 
 from collections.abc import Callable
 
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QGridLayout,
     QLabel,
     QMainWindow,
@@ -105,10 +108,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.on_knob_settings_edited = on_knob_settings_edited
         self.rows: list[KnobRow] = []
+        self.last_state: dict | None = None
         self.daemon_connected = False
         self.device_connected = False
 
         self.setWindowTitle("MIDI bridge")
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.grid = QGridLayout()
         for column, text in enumerate(HEADERS):
             self.grid.addWidget(QLabel(f"<b>{text}</b>"), 0, column)
@@ -125,6 +130,7 @@ class MainWindow(QMainWindow):
 
     def show_state(self, state: dict) -> None:
         """Show a state message received from the daemon."""
+        self.last_state = state
         knobs = state["knobs"]
         if len(knobs) != len(self.rows):
             self._build_rows(len(knobs))
@@ -142,6 +148,20 @@ class MainWindow(QMainWindow):
         self.daemon_connected = connected
         self.centralWidget().setEnabled(connected)
         self._show_status()
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """
+        On Escape, discard the text typed in the focused box and leave it,
+        showing the last state received again.
+        """
+        box = QApplication.focusWidget()
+        if event.key() != Qt.Key.Key_Escape or not isinstance(box, QSpinBox):
+            super().keyPressEvent(event)
+            return
+        box.lineEdit().setText(box.textFromValue(box.value()))
+        self.setFocus()
+        if self.last_state is not None:
+            self.show_state(self.last_state)
 
     def _on_setting_edited(self, index: int, name: str, value: int) -> None:
         """Report one setting edited by the user."""
