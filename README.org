@@ -1,0 +1,242 @@
+#+TITLE: MIDI bridge daemon
+#+AUTHOR: 8dcc
+
+Turn a simple input device, like a rotary knob, into a MIDI controller for any
+program that supports MIDI learn.
+
+The daemon reads the device through evdev and turns its input into absolute MIDI
+Control Change messages on a virtual MIDI port. One physical knob drives several
+"virtual knobs" (CC 20 to 27): turning it while pushed switches between them,
+and a single push toggles the current knob between a fine and a coarse step.
+
+Device support is abstracted behind a small device interface. The first
+supported device is the Anticater, a rotary knob that the kernel sees as a
+keyboard, over USB or Bluetooth.
+
+The project has two programs:
+
+- *Daemon*: always running (as a systemd user service). It waits for the device,
+  owns all state and settings, and sends the MIDI.
+- *GUI*: an optional Qt window that shows the active knob and the values, and lets
+  you change the settings. It talks only to the daemon, over a Unix socket; you
+  can close it and the device keeps working.
+
+* Data flow
+
+#+begin_src mermaid :file /tmp/mermaid-midi-bridge-data-flow.svg
+flowchart LR
+    in_device(["Input device</br>(e.g. Anticater)"])
+    backend["Device backend"]
+    knobs["Knob state<br/>and settings"]
+    port(["Virtual MIDI port"])
+    apps(["Program<br/>(e.g. DAW)"])
+    out_devices(["MIDI devices"])
+    gui(["GUI"])
+
+    in_device -- "evdev events" --> backend
+    backend -- "Rotate / press events" --> knobs
+    knobs -- "CC 20-27" --> port
+    port --> apps
+    port --> out_devices
+    knobs -- "state" --> gui
+    gui -- "settings" --> knobs
+#+end_src
+
+* Code architecture
+
+#+begin_src mermaid :file /tmp/mermaid-midi-bridge-arch.svg
+flowchart LR
+    subgraph daemon["midi_bridge_daemon"]
+        app["app<br/>(wiring)"]
+        device["device<br/>(standard events)"]
+        anticater["anticater<br/>(evdev device)"]
+        controller["controller<br/>(owns the state)"]
+        midi["midi<br/>(virtual port, CC warnings)"]
+        ipc_server["ipc_server<br/>(Unix socket)"]
+
+        anticater -. implements .-> device
+        app --> anticater
+        app --> controller
+        app --> midi
+        app --> ipc_server
+    end
+
+    subgraph common["midi_bridge_common"]
+        ipc_protocol["ipc_protocol<br/>(socket path, messages)"]
+        limits["limits<br/>(value ranges)"]
+    end
+
+    subgraph gui["midi_bridge_gui"]
+        gui_main["__main__<br/>(wiring)"]
+        ipc_client["ipc_client<br/>(socket, reconnect)"]
+        window["window<br/>(Qt widgets)"]
+
+        gui_main --> window
+        gui_main --> ipc_client
+    end
+
+    controller --> limits
+    window --> limits
+    ipc_server --> ipc_protocol
+    ipc_client --> ipc_protocol
+    ipc_server <-.->|JSON lines| ipc_client
+#+end_src
+
+The daemon and the GUI never import each other; they only share
+=midi_bridge_common=. The socket protocol is the only contract between them.
+
+The device, the controller, the MIDI output and the IPC server don't know about
+each other. Each one gets its callbacks when it is created, and =app= connects
+them. The controller reports knob value changes (sent as MIDI) separately from
+any state change (broadcast to the GUIs).
+
+** Callbacks
+
+The callbacks connect the modules as shown below. Solid arrows are callbacks,
+labeled with the name the calling module knows them by; they all land in the
+closures of the wiring module (=app= or the GUI's =__main__=). Dashed arrows are
+the plain method calls those closures make.
+
+#+begin_src mermaid :file /tmp/mermaid-midi-bridge-callbacks.svg
+flowchart LR
+    subgraph daemon["midi_bridge_daemon"]
+        device["AnticaterDevice"]
+        controller["Controller"]
+        midi["MidiOutput"]
+        ipc_server["IpcServer"]
+
+        subgraph app["app (closures)"]
+            on_device_event["on_device_event"]
+            on_knob_value["on_controller_knob_value_changed"]
+            on_state["on_controller_state_changed"]
+            on_client["on_ipc_client_connected"]
+            on_knob_change["on_ipc_knob_change"]
+        end
+
+        device -- "on_event(event)" --> on_device_event
+        on_device_event -. "rotate_selected_knob()<br/>select_adjacent_knob()<br/>toggle_selected_sensitivity()<br/>set_device_connected()" .-> controller
+
+        controller -- "on_knob_value_changed(cc, value)" --> on_knob_value
+        on_knob_value -. "send_control_change()" .-> midi
+
+        controller -- "on_state_changed(state)" --> on_state
+        on_state -. "broadcast()" .-> ipc_server
+
+        ipc_server -- "on_client_connected()<br/>returns the state message" --> on_client
+        on_client -. "reads state" .-> controller
+
+        ipc_server -- "on_knob_change(index, settings)<br/>returns the error or None" --> on_knob_change
+        on_knob_change -. "set_knob_settings()" .-> controller
+    end
+
+    subgraph gui["midi_bridge_gui"]
+        window["MainWindow"]
+        ipc_client["IpcClient"]
+
+        subgraph gui_main["__main__ (closures)"]
+            on_edited["on_window_knob_settings_edited"]
+            on_ipc["on_ipc_state<br/>on_ipc_error<br/>on_ipc_connection_changed"]
+        end
+
+        window -- "on_knob_settings_edited(index, settings)" --> on_edited
+        on_edited -. "send_knob_settings()" .-> ipc_client
+
+        ipc_client -- "on_state(state)<br/>on_error(text)<br/>on_connection_changed(connected)" --> on_ipc
+        on_ipc -. "show_state()<br/>show_error()<br/>show_daemon_connected()" .-> window
+    end
+
+    ipc_server <-.->|JSON lines| ipc_client
+#+end_src
+
+* Installing
+
+Install the dependencies: =evdev=, =mido=, =python-rtmidi= and =PySide6=. For example,
+on Arch Linux:
+
+#+begin_src sh
+sudo pacman -S python-evdev python-mido python-rtmidi pyside6
+#+end_src
+
+The daemon reads the device from =/dev/input=, so your user needs access to it. On
+most distributions, that means being in the =input= group:
+
+#+begin_src sh
+sudo usermod -aG input "$USER"   # then log in again
+#+end_src
+
+Then install and start the daemon (nothing goes outside your home directory):
+
+#+begin_src sh
+./install.sh
+systemctl --user enable --now midi-bridge-daemon
+#+end_src
+
+The daemon grabs the device, so its input no longer reaches the rest of the
+system. For the same reason, no other program may be grabbing it (through evdev
+or otherwise) while the daemon runs.
+
+You can also run both programs straight from the repository with
+=python3 -m midi_bridge_daemon= and =python3 -m midi_bridge_gui=.
+
+* Usage
+
+The daemon creates a MIDI port called =midi-bridge=. Connect it to your program
+like any other MIDI controller (in the program's MIDI settings, or with =qpwgraph=
+or =aconnect=), then map the knobs with the program's MIDI learn.
+
+The controls of a push-and-turn knob are:
+
+| Action           | Effect                                           |
+|------------------+--------------------------------------------------|
+| Turn             | Change the active knob's value                   |
+| Push, then turn  | Switch to the next or previous knob              |
+| Push and release | Toggle the active knob between fine and coarse   |
+
+Each knob has its own step size ("sensitivity") and its own fine and coarse
+values. A push switches the sensitivity to whichever of fine and coarse is
+further from the current one. You can change all three in the GUI:
+
+#+begin_src sh
+midi-bridge-gui
+#+end_src
+
+Edits are sent when you press Enter, leave the field, or click the arrows.
+
+The daemon logs a warning at startup if a knob uses a CC number that is reserved
+or has a conventional meaning in MIDI (mod wheel, volume, sustain, and so
+on). See its log with =journalctl --user -u midi-bridge-daemon=.
+
+* Socket protocol
+
+The daemon listens on =$XDG_RUNTIME_DIR/midi-bridge-daemon.sock= (or
+=/tmp/midi-bridge-daemon-<uid>.sock= if that variable is unset). Messages are JSON
+objects, one per line.
+
+When a client connects, and after every change, the daemon sends the full state:
+
+#+begin_src json
+{"type": "state", "device_connected": true, "selected_knob": 2,
+ "knobs": [{"cc": 20, "value": 64, "sensitivity": 1, "fine": 1, "coarse": 8},
+           ...]}
+#+end_src
+
+A client changes a knob's settings with any subset of =sensitivity=, =fine= and
+=coarse= (integers from 1 to 127):
+
+#+begin_src json
+{"type": "set_knob", "knob": 3, "settings": {"sensitivity": 5}}
+#+end_src
+
+If the request succeeds, every client gets the new state, including the one
+that sent it; that is its confirmation. If it is invalid, only that client gets
+an error back, and nothing changes:
+
+#+begin_src json
+{"type": "error", "message": "coarse must be in 1..127"}
+#+end_src
+
+To poke at it by hand:
+
+#+begin_src sh
+socat - UNIX-CONNECT:"$XDG_RUNTIME_DIR/midi-bridge-daemon.sock"
+#+end_src
