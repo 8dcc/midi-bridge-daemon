@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QProgressBar,
     QSpinBox,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -111,8 +112,12 @@ class MainWindow(QMainWindow):
         self.grid = QGridLayout()
         for column, text in enumerate(HEADERS):
             self.grid.addWidget(QLabel(f"<b>{text}</b>"), 0, column)
+        layout = QVBoxLayout()
+        layout.addStretch()
+        layout.addLayout(self.grid)
+        layout.addStretch()
         central = QWidget()
-        central.setLayout(self.grid)
+        central.setLayout(layout)
         self.setCentralWidget(central)
         self.status_label = QLabel()
         self.statusBar().addPermanentWidget(self.status_label)
