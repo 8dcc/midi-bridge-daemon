@@ -17,11 +17,13 @@
 
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QFrame,
     QGridLayout,
+    QHBoxLayout,
     QLabel,
     QMainWindow,
     QProgressBar,
@@ -41,10 +43,37 @@ from midi_bridge_common.limits import (
 # Milliseconds an error stays in the status bar
 ERROR_MS = 5000
 
-SELECTED_MARKER = ">"
+HEADERS = ("", "Knob", "Value", "") + tuple(name.capitalize()
+                                            for name in SETTING_NAMES)
 
-HEADERS = ("", "Knob", "Value") + tuple(name.capitalize()
-                                        for name in SETTING_NAMES)
+# Grid column of the value bar, the one that takes any extra width
+VALUE_COLUMN = 2
+
+LED_SIZE = 8
+ROW_HEIGHT = 38
+ROW_PADDING = 26
+COLUMN_SPACING = 14
+
+# Largest width of the window, past which it would only add empty space. Its
+# height is fixed to what the rows need.
+MAX_WIDTH = 900
+
+
+def _set_style_property(widget: QWidget, name: str, value) -> None:
+    """Set a property the stylesheet depends on, and restyle 'widget'."""
+    if widget.property(name) == value:
+        return
+    widget.setProperty(name, value)
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+
+
+def _new_led() -> QLabel:
+    """A small round light, colored by the stylesheet."""
+    led = QLabel()
+    led.setObjectName("led")
+    led.setFixedSize(LED_SIZE, LED_SIZE)
+    return led
 
 
 def _has_uncommitted_text(box: QSpinBox) -> bool:
@@ -60,11 +89,22 @@ class KnobRow:
 
     def __init__(self, grid: QGridLayout, row: int, index: int,
                  on_setting_edited: Callable[[int, str, int], None]):
-        self.marker = QLabel()
+        self.band = QFrame()
+        self.band.setObjectName("band")
+        grid.addWidget(self.band, row, 0, 1, grid.columnCount())
+        self.marker = _new_led()
         self.name = QLabel()
         self.value = QProgressBar()
         self.value.setRange(MIN_KNOB_VALUE, MAX_KNOB_VALUE)
         self.value.setFormat("%v")
+        self.value.setTextVisible(False)
+        self.value.setMinimumWidth(120)
+        self.value_text = QLabel()
+        self.value_text.setObjectName("value_text")
+        self.value_text.setAlignment(Qt.AlignmentFlag.AlignRight
+                                     | Qt.AlignmentFlag.AlignVCenter)
+        self.value_text.setMinimumWidth(
+            self.value_text.fontMetrics().horizontalAdvance("000"))
         self.boxes: dict[str, QSpinBox] = {}
         for name in SETTING_NAMES:
             box = QSpinBox()
@@ -74,16 +114,21 @@ class KnobRow:
                 lambda value, name=name: on_setting_edited(index, name, value))
             self.boxes[name] = box
 
-        widgets = [self.marker, self.name, self.value, *self.boxes.values()]
+        widgets = [self.marker, self.name, self.value, self.value_text,
+                   *self.boxes.values()]
         for column, widget in enumerate(widgets):
             grid.addWidget(widget, row, column)
-        self.widgets = widgets
+        grid.setAlignment(self.marker, Qt.AlignmentFlag.AlignCenter)
+        grid.setRowMinimumHeight(row, ROW_HEIGHT)
+        self.widgets = [self.band, *widgets]
 
     def show_knob(self, index: int, knob: dict, selected: bool) -> None:
         """Show the 'knob' entry of a state message."""
-        self.marker.setText(SELECTED_MARKER if selected else "")
+        _set_style_property(self.band, "selected", selected)
+        _set_style_property(self.marker, "selected", selected)
         self.name.setText(f"Knob {index + 1} (CC {knob['cc']})")
         self.value.setValue(knob["value"])
+        self.value_text.setText(str(knob["value"]))
         for name, box in self.boxes.items():
             if _has_uncommitted_text(box):
                 continue
@@ -113,20 +158,32 @@ class MainWindow(QMainWindow):
         self.device_connected = False
 
         self.setWindowTitle("MIDI bridge")
+        # A dialog, so tiling window managers like dwm make it float at its
+        # own size instead of tiling it
+        self.setWindowFlag(Qt.WindowType.Dialog)
+        self.setMaximumWidth(MAX_WIDTH)
         self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self.grid = QGridLayout()
-        for column, text in enumerate(HEADERS):
-            self.grid.addWidget(QLabel(f"<b>{text}</b>"), 0, column)
+        self.grid = self._new_grid()
+        self.panel = QFrame()
+        self.panel.setObjectName("panel")
+        self.panel.setLayout(self.grid)
+        self.badge_led = _new_led()
+        self.badge_text = QLabel()
+        self.badge_text.setObjectName("badge_text")
+        self.badge = self._new_badge(self.badge_led, self.badge_text)
         layout = QVBoxLayout()
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(10)
         layout.addStretch()
-        layout.addLayout(self.grid)
+        layout.addLayout(self._new_header(self.badge))
+        layout.addWidget(self.panel)
         layout.addStretch()
         central = QWidget()
         central.setLayout(layout)
         self.setCentralWidget(central)
-        self.status_label = QLabel()
-        self.statusBar().addPermanentWidget(self.status_label)
+        self.statusBar().setSizeGripEnabled(False)
         self.show_daemon_connected(False)
+        self._fit_height()
 
     def show_state(self, state: dict) -> None:
         """Show a state message received from the daemon."""
@@ -146,7 +203,7 @@ class MainWindow(QMainWindow):
     def show_daemon_connected(self, connected: bool) -> None:
         """Show whether the GUI is connected to the daemon."""
         self.daemon_connected = connected
-        self.centralWidget().setEnabled(connected)
+        self.panel.setEnabled(connected)
         self._show_status()
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -163,6 +220,47 @@ class MainWindow(QMainWindow):
         if self.last_state is not None:
             self.show_state(self.last_state)
 
+    @staticmethod
+    def _new_badge(led: QLabel, text: QLabel) -> QFrame:
+        """A rounded badge with a status 'led' followed by its 'text'."""
+        badge = QFrame()
+        badge.setObjectName("badge")
+        layout = QHBoxLayout(badge)
+        layout.setContentsMargins(10, 4, 12, 4)
+        layout.setSpacing(7)
+        layout.addWidget(led)
+        layout.addWidget(text)
+        return badge
+
+    @staticmethod
+    def _new_header(badge: QFrame) -> QHBoxLayout:
+        """The row above the panel: the title, and the status 'badge'."""
+        title = QLabel("MIDI bridge")
+        title.setObjectName("title")
+        header = QHBoxLayout()
+        header.setContentsMargins(4, 0, 0, 0)
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(badge)
+        return header
+
+    @staticmethod
+    def _new_grid() -> QGridLayout:
+        """The grid of the knob rows, with only its header row for now."""
+        grid = QGridLayout()
+        grid.setContentsMargins(8, 10, 8, 8)
+        grid.setHorizontalSpacing(COLUMN_SPACING)
+        grid.setVerticalSpacing(2)
+        for column, text in enumerate(HEADERS):
+            header = QLabel(text)
+            header.setObjectName("header")
+            grid.addWidget(header, 0, column)
+        grid.setColumnMinimumWidth(0, ROW_PADDING)
+        grid.setColumnStretch(VALUE_COLUMN, 1)
+        # An empty last column, so the selected band reaches past the boxes
+        grid.setColumnMinimumWidth(len(HEADERS), 2)
+        return grid
+
     def _on_setting_edited(self, index: int, name: str, value: int) -> None:
         """Report one setting edited by the user."""
         self.on_knob_settings_edited(index, {name: value})
@@ -174,13 +272,22 @@ class MainWindow(QMainWindow):
         self.rows = [KnobRow(self.grid, index + 1, index,
                              self._on_setting_edited)
                      for index in range(count)]
+        # The new rows are shown, and the old ones deleted, once control
+        # returns to the event loop, so only then is the new height known
+        QTimer.singleShot(0, self._fit_height)
+
+    def _fit_height(self) -> None:
+        """Fix the height of the window to the one its contents need."""
+        self.setFixedHeight(self.sizeHint().height())
 
     def _show_status(self) -> None:
-        """Show the daemon and device status in the permanent status label."""
+        """Show the daemon and device status in the badge."""
         if not self.daemon_connected:
-            text = "Daemon not running"
+            text, status = "Daemon not running", "off"
         elif not self.device_connected:
-            text = "Device not connected"
+            text, status = "Device not connected", "waiting"
         else:
-            text = "Device connected"
-        self.status_label.setText(text)
+            text, status = "Device connected", "ok"
+        self.badge_text.setText(text)
+        for widget in (self.badge, self.badge_led, self.badge_text):
+            _set_style_property(widget, "status", status)

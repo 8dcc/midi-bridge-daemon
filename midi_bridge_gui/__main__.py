@@ -20,12 +20,14 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from midi_bridge_gui.ipc_client import IpcClient
+from midi_bridge_gui.style import apply_style
 from midi_bridge_gui.window import MainWindow
 
 
 def main() -> int:
     """Create the window and the daemon connection, and run the GUI."""
     app = QApplication(sys.argv)
+    apply_style(app)
 
     def on_window_knob_settings_edited(index: int,
                                        settings: dict[str, int]) -> None:
