@@ -42,6 +42,64 @@ flowchart LR
     gui -- "settings" --> knobs
 #+end_src
 
+* Installing
+
+Install the dependencies: =evdev=, =mido=, =python-rtmidi= and =PySide6=. For example,
+on Arch Linux:
+
+#+begin_src sh
+sudo pacman -S python-evdev python-mido python-rtmidi pyside6
+#+end_src
+
+The daemon reads the device from =/dev/input=, so your user needs access to it. On
+most distributions, that means being in the =input= group:
+
+#+begin_src sh
+sudo usermod -aG input "$USER"   # then log in again
+#+end_src
+
+Then install and start the daemon (nothing goes outside your home directory):
+
+#+begin_src sh
+./install.sh
+systemctl --user enable --now midi-bridge-daemon
+#+end_src
+
+The daemon grabs the device, so its input no longer reaches the rest of the
+system. For the same reason, no other program may be grabbing it (through evdev
+or otherwise) while the daemon runs.
+
+You can also run both programs straight from the repository with
+=python3 -m midi_bridge_daemon= and =python3 -m midi_bridge_gui=.
+
+* Usage
+
+The daemon creates a MIDI port called =midi-bridge=. Connect it to your program
+like any other MIDI controller (in the program's MIDI settings, or with =qpwgraph=
+or =aconnect=), then map the knobs with the program's MIDI learn.
+
+The controls of a push-and-turn knob are:
+
+| Action           | Effect                                           |
+|------------------+--------------------------------------------------|
+| Turn             | Change the active knob's value                   |
+| Push, then turn  | Switch to the next or previous knob              |
+| Push and release | Toggle the active knob between fine and coarse   |
+
+Each knob has its own step size ("sensitivity") and its own fine and coarse
+values. A push switches the sensitivity to whichever of fine and coarse is
+further from the current one. You can change all three in the GUI:
+
+#+begin_src sh
+midi-bridge-gui
+#+end_src
+
+Edits are sent when you press Enter, leave the field, or click the arrows.
+
+The daemon logs a warning at startup if a knob uses a CC number that is reserved
+or has a conventional meaning in MIDI (mod wheel, volume, sustain, and so
+on). See its log with =journalctl --user -u midi-bridge-daemon=.
+
 * Code architecture
 
 #+begin_src mermaid :file /tmp/mermaid-midi-bridge-arch.svg
@@ -147,64 +205,6 @@ flowchart LR
 
     ipc_server <-.->|JSON lines| ipc_client
 #+end_src
-
-* Installing
-
-Install the dependencies: =evdev=, =mido=, =python-rtmidi= and =PySide6=. For example,
-on Arch Linux:
-
-#+begin_src sh
-sudo pacman -S python-evdev python-mido python-rtmidi pyside6
-#+end_src
-
-The daemon reads the device from =/dev/input=, so your user needs access to it. On
-most distributions, that means being in the =input= group:
-
-#+begin_src sh
-sudo usermod -aG input "$USER"   # then log in again
-#+end_src
-
-Then install and start the daemon (nothing goes outside your home directory):
-
-#+begin_src sh
-./install.sh
-systemctl --user enable --now midi-bridge-daemon
-#+end_src
-
-The daemon grabs the device, so its input no longer reaches the rest of the
-system. For the same reason, no other program may be grabbing it (through evdev
-or otherwise) while the daemon runs.
-
-You can also run both programs straight from the repository with
-=python3 -m midi_bridge_daemon= and =python3 -m midi_bridge_gui=.
-
-* Usage
-
-The daemon creates a MIDI port called =midi-bridge=. Connect it to your program
-like any other MIDI controller (in the program's MIDI settings, or with =qpwgraph=
-or =aconnect=), then map the knobs with the program's MIDI learn.
-
-The controls of a push-and-turn knob are:
-
-| Action           | Effect                                           |
-|------------------+--------------------------------------------------|
-| Turn             | Change the active knob's value                   |
-| Push, then turn  | Switch to the next or previous knob              |
-| Push and release | Toggle the active knob between fine and coarse   |
-
-Each knob has its own step size ("sensitivity") and its own fine and coarse
-values. A push switches the sensitivity to whichever of fine and coarse is
-further from the current one. You can change all three in the GUI:
-
-#+begin_src sh
-midi-bridge-gui
-#+end_src
-
-Edits are sent when you press Enter, leave the field, or click the arrows.
-
-The daemon logs a warning at startup if a knob uses a CC number that is reserved
-or has a conventional meaning in MIDI (mod wheel, volume, sustain, and so
-on). See its log with =journalctl --user -u midi-bridge-daemon=.
 
 * Socket protocol
 
